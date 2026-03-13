@@ -1,5 +1,6 @@
 # IMPORT LIBRARIES
 import os
+import torch
 import numpy as np
 
 from datasets import load_dataset
@@ -18,7 +19,6 @@ os.environ["HF_DATASETS_CACHE"] = "./hf_cache"
 # LOAD DATASET (IMDb)
 print("Loading IMDb dataset...")
 dataset = load_dataset("imdb")
-dataset
 
 # INITIALIZE TOKENIZER
 print("Initializing tokenizer...")
@@ -41,9 +41,10 @@ tokenized_datasets = dataset.map(
 )
 
 # SET FORMAT FOR PYTORCH
-tokenized_datasets = tokenized_datasets.remove_columns(["text"])
-tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
-tokenized_datasets.set_format("torch")
+tokenized_datasets.set_format(
+    type='torch',
+    columns=['input_ids', 'attention_mask', 'label']
+)
 
 # LOAD MODEL
 print("Loading BERT model...")
@@ -55,7 +56,7 @@ model = BertForSequenceClassification.from_pretrained(
 # METRICS FUNCTION
 def compute_metrics(pred):
     labels = pred.label_ids
-    preds = np.argmax(pred.predictions, axis=1)
+    preds = pred.predictions.argmax(-1)
 
     precision, recall, f1, _ = precision_recall_fscore_support(
         labels, preds, average="binary"
@@ -77,21 +78,43 @@ training_args = TrainingArguments(
     per_device_eval_batch_size=8,
     num_train_epochs=1,
     weight_decay=0.01,
-    logging_dir="./logs",
-    logging_steps=100
+    evaluation_strategy="epoch",
+    save_strategy="no",  # avoids file overwrite
+    logging_dir="./logs"
 )
 
 # TRAINER
 trainer = Trainer(
     model=model,
     args=training_args,
-    train_dataset=tokenized_datasets["train"],
-    eval_dataset=tokenized_datasets["test"],
+    train_dataset=tokenized_datasets["train"].shuffle(seed=42).select(range(2000)),
+    eval_dataset=tokenized_datasets["test"].shuffle(seed=42).select(range(1000)),
+    tokenizer=tokenizer,
     compute_metrics=compute_metrics
 )
 
 # TRAIN MODEL
+print("Training started...")
 trainer.train()
 
 # EVALUATE MODEL
-trainer.evaluate()
+print("Evaluating...")
+results = trainer.evaluate()
+print("Evaluation Results:", results)
+
+# SAVE MODEL SAFELY
+model.save_pretrained("bert-imdb-model")
+tokenizer.save_pretrained("bert-imdb-model")
+
+# PREDICTION FUNCTION
+def predict(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+    outputs = model(**inputs)
+    logits = outputs.logits
+    predicted_class_id = torch.argmax(logits).item()
+    return "Positive Review 😊" if predicted_class_id == 1 else "Negative Review 😞"
+
+# TEST PREDICTIONS
+print("\nSample Predictions:")
+print("1.", predict("This movie was amazing and full of emotions!"))
+print("2.", predict("This was the worst acting I have ever seen."))
